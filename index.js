@@ -1,361 +1,174 @@
-const {
-  Client,
-  GatewayIntentBits,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  EmbedBuilder,
-  Events,
-  Collection
-} = require("discord.js");
-
-const fetch = require("node-fetch");
 const fs = require("fs");
-
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
-const CHANNEL_ID = process.env.CHANNEL_ID;
+const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Events } = require("discord.js");
+const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-const watchlistFile = "./watchlist.json";
-let watchlist = {};
+const notifyFile = "./notify.json";
 
-if (fs.existsSync(watchlistFile)) {
-  watchlist = JSON.parse(fs.readFileSync(watchlistFile, "utf8"));
-} else {
-  fs.writeFileSync(watchlistFile, JSON.stringify({}));
+function loadNotify() {
+  return JSON.parse(fs.readFileSync(notifyFile, "utf8"));
 }
 
-function saveWatchlist() {
-  fs.writeFileSync(watchlistFile, JSON.stringify(watchlist, null, 2));
+function saveNotify(data) {
+  fs.writeFileSync(notifyFile, JSON.stringify(data, null, 2));
 }
 
 function getDay(offset) {
-  const date = new Date();
-  date.setDate(date.getDate() + offset);
-
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, "0");
-  const dd = String(date.getDate()).padStart(2, "0");
-
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function getCountdown(airingTime) {
-  const now = Date.now();
-  const diff = airingTime - now;
-
-  if (diff <= 0) return "Now";
-
-  const hours = Math.floor(diff / (1000 * 60 * 60));
-  const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-  return `${hours}h ${mins}m`;
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 async function fetchSchedule(offset) {
-  const date = getDay(offset);
-  const url = `https://api.jikan.moe/v4/schedules?filter=${date}`;
+  const day = getDay(offset);
+  const query = `
+    query ($day: String) {
+      Page(page: 1, perPage: 50) {
+        media(search: "", sort: POPULARITY_DESC, type: ANIME) {
+          id
+          title {
+            romaji
+          }
+          coverImage {
+            large
+          }
+          nextAiringEpisode {
+            airingAt
+            episode
+          }
+        }
+      }
+    }
+  `;
 
-  const response = await fetch(url);
-  const json = await response.json();
-
-  return json.data || [];
-}
-
-async function fetchTrending(page = 1) {
-  const url = `https://api.jikan.moe/v4/top/anime?page=${page}`;
-  const response = await fetch(url);
-  const json = await response.json();
-  return json.data || [];
-}
-
-async function searchAnime(query) {
-  const url = `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(query)}&limit=5`;
-  const response = await fetch(url);
-  const json = await response.json();
-  return json.data || [];
-}
-
-async function fetchRandomAnime() {
-  const url = `https://api.jikan.moe/v4/random/anime`;
-  const response = await fetch(url);
-  const json = await response.json();
-  return json.data || null;
-}
-
-async function fetchAnimeInfo(id) {
-  const url = `https://api.jikan.moe/v4/anime/${id}/full`;
-  const response = await fetch(url);
-  const json = await response.json();
-  return json.data || null;
-}
-
-function createScheduleEmbed(date, data) {
-  const embed = new EmbedBuilder()
-    .setTitle(`🌑 Anime Schedule • ${date}`)
-    .setColor(0x2b0b3b)
-    .setDescription("Here’s what’s airing today. (Dark Mode Edition)")
-    .setFooter({ text: "Powered by Jikan API • Updated daily" })
-    .setTimestamp();
-
-  if (!data.length) {
-    embed.setDescription("Nothing airing that day.");
-    return embed;
-  }
-
-  embed.setThumbnail(data[0].images.jpg.image_url);
-
-  const fields = data.slice(0, 10).map((anime) => {
-    const time = anime.broadcast?.time || "Unknown time";
-    const airingTimestamp = anime.broadcast?.time ? Date.parse(`${getDay(0)}T${time}:00Z`) : null;
-    const countdown = airingTimestamp ? getCountdown(airingTimestamp) : "Unknown";
-
-    return {
-      name: `🌙 ${anime.title}`,
-      value: `Type: **${anime.type}** • Time: **${time}** • Countdown: **${countdown}**`,
-      inline: false,
-    };
+  const response = await fetch("https://graphql.anilist.co", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables: { day } })
   });
 
-  embed.addFields(fields);
-  return embed;
+  const data = await response.json();
+  return data.data.Page.media.filter(m => m.nextAiringEpisode);
 }
 
-function createTrendingEmbed(data, page) {
-  const embed = new EmbedBuilder()
-    .setTitle("🔥 Trending Anime")
-    .setColor(0x2b0b3b)
-    .setDescription("Top anime by popularity")
-    .setFooter({ text: `Page ${page} • Powered by Jikan API` })
-    .setTimestamp();
-
-  const fields = data.slice(0, 10).map((anime) => {
-    return {
-      name: `• ${anime.title}`,
-      value: `Score: ${anime.score || "N/A"} • Episodes: ${anime.episodes || "N/A"} • Type: ${anime.type || "N/A"}`,
-      inline: false,
-    };
-  });
-
-  embed.addFields(fields);
-  return embed;
+function formatTime(unix) {
+  const date = new Date(unix * 1000);
+  return `${date.getHours()}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-function createSearchEmbed(data, query) {
-  const embed = new EmbedBuilder()
-    .setTitle(`🔍 Search Results for "${query}"`)
-    .setColor(0x2b0b3b)
-    .setFooter({ text: "Powered by Jikan API" })
-    .setTimestamp();
+async function getOrCreateThread(channel) {
+  const threads = await channel.threads.fetch();
+  let thread = threads.threads.find(t => t.name === "anime-notify");
 
-  if (!data.length) {
-    embed.setDescription("No results found.");
-    return embed;
+  if (!thread) {
+    thread = await channel.threads.create({
+      name: "anime-notify",
+      autoArchiveDuration: 1440,
+      reason: "Anime notify thread"
+    });
   }
 
-  const fields = data.map((anime) => {
-    return {
-      name: anime.title,
-      value: `Score: ${anime.score || "N/A"} • Episodes: ${anime.episodes || "N/A"}\nID: ${anime.mal_id} • ${anime.url}`,
-      inline: false,
-    };
-  });
-
-  embed.addFields(fields);
-  embed.setThumbnail(data[0].images.jpg.image_url);
-  return embed;
+  return thread;
 }
 
-function createRandomEmbed(anime) {
-  const embed = new EmbedBuilder()
-    .setTitle(`🎲 Random Anime: ${anime.title}`)
-    .setColor(0x2b0b3b)
-    .setDescription(anime.synopsis || "No synopsis available.")
-    .setFooter({ text: "Powered by Jikan API" })
-    .setTimestamp()
-    .setThumbnail(anime.images.jpg.image_url)
-    .addFields(
-      { name: "Type", value: anime.type || "N/A", inline: true },
-      { name: "Score", value: String(anime.score || "N/A"), inline: true },
-      { name: "Episodes", value: String(anime.episodes || "N/A"), inline: true }
-    );
+async function sendScheduleMessage(channel, offset, label) {
+  const schedule = await fetchSchedule(offset);
 
-  return embed;
-}
+  if (!schedule.length) {
+    const embed = new EmbedBuilder()
+      .setTitle(`${label} Schedule`)
+      .setDescription("Nothing airing that day.")
+      .setColor("#2f3136");
 
-function createInfoEmbed(anime) {
-  const embed = new EmbedBuilder()
-    .setTitle(`📌 Anime Info: ${anime.title}`)
-    .setColor(0x2b0b3b)
-    .setDescription(anime.synopsis || "No synopsis available.")
-    .setThumbnail(anime.images.jpg.image_url)
-    .setFooter({ text: `ID: ${anime.mal_id} • Powered by Jikan API` })
-    .addFields(
-      { name: "Type", value: anime.type || "N/A", inline: true },
-      { name: "Episodes", value: String(anime.episodes || "N/A"), inline: true },
-      { name: "Status", value: anime.status || "N/A", inline: true },
-      { name: "Score", value: String(anime.score || "N/A"), inline: true },
-      { name: "Genres", value: anime.genres.map(g => g.name).slice(0, 6).join(", ") || "N/A", inline: false },
-      { name: "Trailer", value: anime.trailer?.url || "N/A", inline: false }
-    );
-
-  return embed;
-}
-
-function createWatchlistEmbed(userId) {
-  const list = watchlist[userId] || [];
-  const embed = new EmbedBuilder()
-    .setTitle("📚 Your Watchlist")
-    .setColor(0x2b0b3b)
-    .setFooter({ text: "Powered by Jikan API" })
-    .setTimestamp();
-
-  if (!list.length) {
-    embed.setDescription("Your watchlist is empty.");
-    return embed;
+    await channel.send({ embeds: [embed] });
+    return;
   }
 
-  embed.setDescription(list.map(item => `• ${item.title} (ID: ${item.id})`).join("\n"));
-  return embed;
-}
+  const embed = new EmbedBuilder()
+    .setTitle(`${label} Schedule`)
+    .setDescription(schedule.slice(0, 10).map(anime => `• **${anime.title.romaji}** at ${formatTime(anime.nextAiringEpisode.airingAt)}`).join("\n"))
+    .setColor("#2f3136")
+    .setThumbnail(schedule[0].coverImage.large);
 
-async function sendScheduleMessage(channel) {
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("yesterday").setLabel("⬅️ Yesterday").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("today").setLabel("🟣 Today").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId("tomorrow").setLabel("Tomorrow ➡️").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("trending").setLabel("🔥 Trending").setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId("random").setLabel("🎲 Random").setStyle(ButtonStyle.Success)
+    new ButtonBuilder().setCustomId("notify").setLabel("🔔 Notify Me").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("unnotify").setLabel("🔕 Unsubscribe").setStyle(ButtonStyle.Secondary)
   );
-
-  const date = getDay(0);
-  const data = await fetchSchedule(0);
-  const embed = createScheduleEmbed(date, data);
 
   await channel.send({ embeds: [embed], components: [row] });
 }
 
-client.once(Events.ClientReady, async () => {
+let lastSchedule = [];
+
+async function checkNewEpisodes() {
+  const data = loadNotify();
+  const users = data.users;
+  if (!users.length) return;
+
+  const channel = await client.channels.fetch(process.env.CHANNEL_ID);
+  const thread = await getOrCreateThread(channel);
+
+  const schedule = await fetchSchedule(0);
+  const currentIds = schedule.map(a => a.id);
+
+  if (!lastSchedule.length) {
+    lastSchedule = currentIds;
+    return;
+  }
+
+  for (const anime of schedule) {
+    if (!lastSchedule.includes(anime.id)) {
+      lastSchedule.push(anime.id);
+
+      const mentions = users.map(id => `<@${id}>`).join(" ");
+      await thread.send(`${mentions}\n🔔 **${anime.title.romaji}** just released a new episode!`);
+    }
+  }
+}
+
+client.on(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  // Set bot presence
-  client.user.setPresence({
-    activities: [{ name: "Anime • /search", type: 3 }],
-    status: "online",
-  });
+  // Create a tiny web server (for Railway uptime)
+  const express = require("express");
+  const app = express();
+  app.get("/", (req, res) => res.send("Alive"));
+  app.listen(3000);
 
-  // Auto schedule update
-  const channel = await client.channels.fetch(CHANNEL_ID);
-  await sendScheduleMessage(channel);
+  // Send schedule once on startup
+  const channel = await client.channels.fetch(process.env.CHANNEL_ID);
+  await sendScheduleMessage(channel, 0, "Today");
 
-  setInterval(async () => {
-    const date = getDay(0);
-    const data = await fetchSchedule(0);
-    const embed = createScheduleEmbed(date, data);
-
-    // send new message every day at midnight UTC
-    const now = new Date();
-    if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0) {
-      await channel.send({ embeds: [embed] });
-    }
-  }, 60 * 1000);
+  // Check every 10 minutes
+  setInterval(checkNewEpisodes, 10 * 60 * 1000);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (interaction.isButton()) {
-    if (interaction.customId === "trending") {
-      const data = await fetchTrending(1);
-      const embed = createTrendingEmbed(data, 1);
+  if (!interaction.isButton()) return;
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("trend_prev_1").setLabel("⬅️ Prev").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("trend_next_1").setLabel("Next ➡️").setStyle(ButtonStyle.Secondary)
-      );
+  const data = loadNotify();
+  const userId = interaction.user.id;
 
-      return interaction.update({ embeds: [embed], components: [row] });
+  if (interaction.customId === "notify") {
+    if (data.users.includes(userId)) {
+      return interaction.reply({ content: "🔔 You are already subscribed.", ephemeral: true });
     }
 
-    if (interaction.customId === "random") {
-      const anime = await fetchRandomAnime();
-      const embed = createRandomEmbed(anime);
-      return interaction.update({ embeds: [embed] });
-    }
+    data.users.push(userId);
+    saveNotify(data);
 
-    let offset = 0;
-    if (interaction.customId === "yesterday") offset = -1;
-    if (interaction.customId === "tomorrow") offset = 1;
-
-    const date = getDay(offset);
-    const data = await fetchSchedule(offset);
-    const embed = createScheduleEmbed(date, data);
-    return interaction.update({ embeds: [embed] });
+    return interaction.reply({ content: "🔔 Subscribed! You will be tagged in the notify thread when a new episode releases.", ephemeral: true });
   }
 
-  if (interaction.isChatInputCommand()) {
-    const name = interaction.commandName;
+  if (interaction.customId === "unnotify") {
+    data.users = data.users.filter(id => id !== userId);
+    saveNotify(data);
 
-    if (name === "search") {
-      const query = interaction.options.getString("anime");
-      const data = await searchAnime(query);
-      const embed = createSearchEmbed(data, query);
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    if (name === "animeinfo") {
-      const id = interaction.options.getInteger("id");
-      const anime = await fetchAnimeInfo(id);
-      const embed = createInfoEmbed(anime);
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    if (name === "watchlist") {
-      const sub = interaction.options.getSubcommand();
-
-      if (sub === "add") {
-        const id = interaction.options.getInteger("id");
-        const anime = await fetchAnimeInfo(id);
-
-        if (!watchlist[interaction.user.id]) watchlist[interaction.user.id] = [];
-        watchlist[interaction.user.id].push({ id: anime.mal_id, title: anime.title });
-        saveWatchlist();
-
-        return interaction.reply({ content: `✅ Added **${anime.title}** to your watchlist.`, ephemeral: true });
-      }
-
-      if (sub === "remove") {
-        const id = interaction.options.getInteger("id");
-        watchlist[interaction.user.id] = (watchlist[interaction.user.id] || []).filter(x => x.id !== id);
-        saveWatchlist();
-        return interaction.reply({ content: `🗑️ Removed ID **${id}** from your watchlist.`, ephemeral: true });
-      }
-
-      if (sub === "list") {
-        const embed = createWatchlistEmbed(interaction.user.id);
-        return interaction.reply({ embeds: [embed], ephemeral: true });
-      }
-    }
-
-    if (name === "recommend") {
-      const genre = interaction.options.getString("genre");
-      const url = `https://api.jikan.moe/v4/anime?genres=${encodeURIComponent(genre)}&order_by=score&sort=desc&limit=5`;
-      const res = await fetch(url);
-      const json = await res.json();
-      const data = json.data || [];
-
-      const embed = new EmbedBuilder()
-        .setTitle(`🎯 Recommendations • ${genre}`)
-        .setColor(0x2b0b3b)
-        .setDescription(data.length ? data.map(a => `• ${a.title} • Score: ${a.score || "N/A"}`).join("\n") : "No results found.")
-        .setFooter({ text: "Powered by Jikan API" })
-        .setTimestamp();
-
-      return interaction.reply({ embeds: [embed] });
-    }
+    return interaction.reply({ content: "🔕 Unsubscribed.", ephemeral: true });
   }
 });
 
-client.login(TOKEN);
+client.login(process.env.DISCORD_TOKEN);
