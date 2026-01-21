@@ -1,12 +1,5 @@
-{
-  "name": "anime-release-bot",
-  "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "discord.js": "^14.12.0",
-    "node-fetch": "^3.3.2"
-  }
+"dependencies": {
+  "discord.js": "^14.0.0",
+  "node-fetch": "^3.3.1",
+  "express": "^4.18.2"
 }
