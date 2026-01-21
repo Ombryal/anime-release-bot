@@ -6,38 +6,40 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const TOKEN = process.env.DISCORD_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 
-function getDayRange(offsetDays) {
-  const d = new Date();
-  d.setDate(d.getDate() + offsetDays);
-  d.setHours(0,0,0,0);
-  const start = Math.floor(d.getTime() / 1000);
+// Convert offset to day name
+function getDayName(offsetDays) {
+  const date = new Date();
+  date.setDate(date.getDate() + offsetDays);
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  return days[date.getDay()];
+}
 
-  const e = new Date(d);
-  e.setHours(23,59,59,999);
-  const end = Math.floor(e.getTime() / 1000);
+// Get start and end timestamps for a day (UTC)
+function getDayRangeUTC(offsetDays) {
+  const date = new Date();
+  date.setDate(date.getDate() + offsetDays);
+
+  // Set to UTC start and end
+  const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0) / 1000;
+  const end = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59) / 1000;
 
   return { start, end };
 }
 
 async function fetchAniListReleases(offsetDays) {
-  const { start, end } = getDayRange(offsetDays);
+  const { start, end } = getDayRangeUTC(offsetDays);
 
   const query = `
     query ($start: Int, $end: Int) {
-      Page(perPage: 25) {
-        media(
-          sort: POPULARITY_DESC
-          airingBetween: [$start, $end]
-          format_in: [TV, TV_SHORT, SPECIAL, OVA, ONA]
-        ) {
-          id
-          title {
-            romaji
-            english
-          }
-          nextAiringEpisode {
-            airingAt
-            episode
+      Page(perPage: 50) {
+        airingSchedules(airingAt_greater: $start, airingAt_lesser: $end, sort: TIME) {
+          episode
+          airingAt
+          media {
+            title {
+              romaji
+              english
+            }
           }
         }
       }
@@ -55,29 +57,58 @@ async function fetchAniListReleases(offsetDays) {
   const json = await response.json();
   if (!json.data || !json.data.Page) return [];
 
-  return json.data.Page.media.map(a => {
-    const time = a.nextAiringEpisode
-      ? new Date(a.nextAiringEpisode.airingAt * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
-      : "TBA";
+  return json.data.Page.airingSchedules.map(a => {
+    const title = a.media.title.english || a.media.title.romaji;
+    const timeUTC = new Date(a.airingAt * 1000);
+    const time = timeUTC.toISOString().split('T')[1].slice(0,5); // HH:MM
 
     return {
-      title: a.title.english || a.title.romaji,
+      title,
       time,
-      nextEp: a.nextAiringEpisode?.episode ?? "?"
+      episode: a.episode,
+      hourUTC: timeUTC.getUTCHours()
     };
   });
 }
 
+function getMostActiveHour(releases) {
+  const hourCount = {};
+
+  releases.forEach(r => {
+    hourCount[r.hourUTC] = (hourCount[r.hourUTC] || 0) + 1;
+  });
+
+  let maxHour = null;
+  let maxCount = 0;
+
+  for (const hour in hourCount) {
+    if (hourCount[hour] > maxCount) {
+      maxCount = hourCount[hour];
+      maxHour = hour;
+    }
+  }
+
+  return { maxHour, maxCount };
+}
+
 async function createEmbed(offsetDays) {
   const releases = await fetchAniListReleases(offsetDays);
+  const dayName = getDayName(offsetDays);
+
+  const { maxHour, maxCount } = getMostActiveHour(releases);
+
+  const mostActiveTime = maxHour !== null
+    ? `${String(maxHour).padStart(2, '0')}:00 UTC (${maxCount} episodes)`
+    : "N/A";
 
   const embed = new EmbedBuilder()
-    .setTitle(`Anime Releases`)
+    .setTitle(`Anime Releases - ${dayName}`)
     .setDescription(
       releases.length
-        ? releases.map(r => `• **${r.title}** Ep **${r.nextEp}** at **${r.time}**`).join("\n")
+        ? releases.map(r => `• **${r.title}** Ep **${r.episode}** at **${r.time} UTC**`).join("\n")
         : "Nothing airing that day."
     )
+    .addFields({ name: "Most Active Time", value: mostActiveTime })
     .setColor(0x00AE86);
 
   return embed;
@@ -107,10 +138,7 @@ async function sendInitialMessage(channel) {
 
 client.on(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
-
   const channel = await client.channels.fetch(CHANNEL_ID);
-  if (!channel) return console.log("Channel not found");
-
   await sendInitialMessage(channel);
 });
 
