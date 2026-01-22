@@ -8,7 +8,14 @@ const client = new Client({
 
 const notifyFile = "./notify.json";
 
+function ensureNotifyFile() {
+  if (!fs.existsSync(notifyFile)) {
+    fs.writeFileSync(notifyFile, JSON.stringify({ users: [] }, null, 2));
+  }
+}
+
 function loadNotify() {
+  ensureNotifyFile();
   return JSON.parse(fs.readFileSync(notifyFile, "utf8"));
 }
 
@@ -23,11 +30,10 @@ function getDay(offset) {
 }
 
 async function fetchSchedule(offset) {
-  const day = getDay(offset);
   const query = `
-    query ($day: String) {
+    query {
       Page(page: 1, perPage: 50) {
-        media(search: "", sort: POPULARITY_DESC, type: ANIME) {
+        media(sort: POPULARITY_DESC, type: ANIME) {
           id
           title {
             romaji
@@ -47,7 +53,7 @@ async function fetchSchedule(offset) {
   const response = await fetch("https://graphql.anilist.co", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, variables: { day } })
+    body: JSON.stringify({ query })
   });
 
   const data = await response.json();
@@ -132,17 +138,16 @@ async function checkNewEpisodes() {
 client.on(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  // Create a tiny web server (for Railway uptime)
   const express = require("express");
   const app = express();
-  app.get("/", (req, res) => res.send("Alive"));
-  app.listen(3000);
+  const PORT = process.env.PORT || 3000;
 
-  // Send schedule once on startup
+  app.get("/", (req, res) => res.send("Alive"));
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
   const channel = await client.channels.fetch(process.env.CHANNEL_ID);
   await sendScheduleMessage(channel, 0, "Today");
 
-  // Check every 10 minutes
   setInterval(checkNewEpisodes, 10 * 60 * 1000);
 });
 
